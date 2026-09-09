@@ -1,0 +1,25 @@
+[package]
+name = "pusd-token"
+version = "0.1.0"
+edition = "2021"
+description = "PUSD Soroban token contract: standard token interface with issuer-controlled mint/burn for the PUSD stable asset on Pi."
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+soroban-sdk = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+debug = 0
+strip = "symbols"
+debug-assertions = false
+panic = "abort"
+codegen-units = 1
+lto = true

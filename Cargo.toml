@@ -1,0 +1,31 @@
+[workspace]
+resolver = "2"
+members = [
+    "lending-pool",
+    "price-oracle",
+    "pusd-pool",
+    "pusd-token",
+    "pusd-escrow",
+    "pusd-streaming",
+    "pusd-subscriptions",
+    "pusd-savings",
+    "pusd-incentives",
+    "pusd-payroll",
+]
+
+[workspace.package]
+edition = "2021"
+
+[workspace.dependencies]
+soroban-sdk = "23.5"
+soroban-token-sdk = "23.5"
+
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+debug = 0
+strip = "symbols"
+debug-assertions = false
+panic = "abort"
+codegen-units = 1
+lto = true
