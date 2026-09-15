@@ -39,6 +39,7 @@ pub enum Error {
     InvalidAmount = 4,
     InvalidSchedule = 5,
     StreamNotFound = 6,
+    AlreadyExists = 7,
 }
 
 use soroban_sdk::panic_with_error;
@@ -75,6 +76,11 @@ impl PusdStreaming {
         payer.require_auth();
         require(&e, total_amount > 0, Error::InvalidAmount);
         require(&e, end_ledger > start_ledger, Error::InvalidSchedule);
+        require(
+            &e,
+            !e.storage().instance().has(&DataKey::Stream(stream_id.clone())),
+            Error::AlreadyExists,
+        );
 
         let pusd_token: Address = e
             .storage()
@@ -97,6 +103,7 @@ impl PusdStreaming {
             cancelled: false,
         };
 
+        // 4.5: unique stream id — key by the provided id, reject collisions.
         e.storage().instance().set(&DataKey::Stream(stream_id), &stream);
     }
 
@@ -128,15 +135,12 @@ impl PusdStreaming {
             return;
         }
 
-        let client = token::Client::new(&e, &stream.pusd_token);
-        client.transfer(
-            &e.current_contract_address(),
-            &stream.payee,
-            &owed,
-        );
-
+        // 4.5: update state before the external transfer (CEI).
         stream.withdrawn_amount += owed;
         e.storage().instance().set(&key, &stream);
+
+        let client = token::Client::new(&e, &stream.pusd_token);
+        client.transfer(&e.current_contract_address(), &stream.payee, &owed);
     }
 
     pub fn cancel(e: Env, stream_id: Address, payer: Address) {
@@ -152,8 +156,12 @@ impl PusdStreaming {
 
         let accrued = Self::accrued_amount(&e, &stream);
         let remaining = stream.total_amount - accrued;
-        let client = token::Client::new(&e, &stream.pusd_token);
 
+        // 4.5: update state before the external transfer (CEI).
+        stream.cancelled = true;
+        e.storage().instance().set(&key, &stream);
+
+        let client = token::Client::new(&e, &stream.pusd_token);
         if remaining > 0 {
             client.transfer(
                 &e.current_contract_address(),
@@ -161,9 +169,6 @@ impl PusdStreaming {
                 &remaining,
             );
         }
-
-        stream.cancelled = true;
-        e.storage().instance().set(&key, &stream);
     }
 
     pub fn get_stream(e: Env, stream_id: Address) -> Option<Stream> {

@@ -52,6 +52,7 @@ pub enum PayrollError {
     AlreadyClaimed = 9,
     AgreementInactive = 10,
     TooManyEmployees = 11,
+    InvalidAmount = 12,
 }
 
 fn get_config(env: &Env) -> PayrollConfig {
@@ -130,6 +131,9 @@ impl PusdPayroll {
         let mut total_commitment: i128 = 0;
         for i in 0..employees.len() {
             let amount_per_period = amounts_per_period.get(i).unwrap();
+            if amount_per_period <= 0 {
+                return Err(PayrollError::InvalidAmount);
+            }
             total_commitment += amount_per_period * (total_periods as i128);
         }
 
@@ -177,7 +181,6 @@ impl PusdPayroll {
         env: Env,
         employee: Address,
         payroll_id: u64,
-        current_ledger: u32,
     ) -> Result<i128, PayrollError> {
         let config = get_config(&env);
         if config.paused {
@@ -195,6 +198,8 @@ impl PusdPayroll {
             return Err(PayrollError::AgreementInactive);
         }
 
+        // 4.2: derive the ledger from the protocol, never from caller input.
+        let current_ledger = env.ledger().sequence();
         let elapsed = current_ledger.saturating_sub(agreement.start_ledger);
         let completed_periods = (elapsed / agreement.period_ledgers).min(agreement.total_periods);
         let unclaimed_periods = completed_periods.saturating_sub(
@@ -278,11 +283,12 @@ impl PusdPayroll {
     pub fn get_vested_amount(
         env: Env,
         payroll_id: u64,
-        current_ledger: u32,
     ) -> Result<i128, PayrollError> {
         let agreement = get_payroll(&env, payroll_id)
             .ok_or(PayrollError::AgreementNotFound)?;
 
+        // 4.2: derive the ledger from the protocol, never from caller input.
+        let current_ledger = env.ledger().sequence();
         let elapsed = current_ledger.saturating_sub(agreement.start_ledger);
         let completed_periods = (elapsed / agreement.period_ledgers).min(agreement.total_periods);
         let vested = (completed_periods as i128) * agreement.amount_per_period;

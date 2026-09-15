@@ -11,6 +11,7 @@ use soroban_sdk::{
 const SCALAR_7: i128 = 10_000_000;
 const SCALAR_12: i128 = 1_000_000_000_000;
 const DECIMALS: i128 = 10_000_000; // 7 decimals for Stellar assets
+const SECONDS_PER_YEAR: i128 = 31_536_000;
 
 // ----- Pool config -----
 
@@ -34,6 +35,7 @@ pub struct ReserveConfig {
     pub decimals: u32,
     pub c_factor: u32, // collateral factor, 7 decimals (e.g. 0.8e7 = 80%)
     pub l_factor: u32, // liability factor, 7 decimals (e.g. 0.9e7 = 90%)
+    pub interest_rate: u32, // annual borrow rate, 7 decimals (e.g. 500_000 = 5%)
     pub enabled: bool,
 }
 
@@ -153,6 +155,7 @@ impl PusdPool {
             decimals: 7,
             c_factor: 8_000_000, // 80%
             l_factor: 0,
+            interest_rate: 0, // Pi is collateral-only, not borrowable
             enabled: true,
         };
         let pi_data = ReserveData {
@@ -171,6 +174,7 @@ impl PusdPool {
             decimals: 7,
             c_factor: 0,
             l_factor: 9_000_000, // 90%
+            interest_rate: 500_000, // 5% annual borrow rate
             enabled: true,
         };
         let pusd_data = ReserveData {
@@ -207,11 +211,54 @@ impl PusdPool {
             .unwrap_or_else(|| panic!("reserve not found"))
     }
 
-    fn get_reserve_data(e: &Env, asset: &Address) -> ReserveData {
+    fn raw_reserve_data(e: &Env, asset: &Address) -> ReserveData {
         e.storage()
             .instance()
             .get(&(symbol_short!("res_data"), asset.clone()))
             .unwrap_or_else(|| panic!("reserve data not found"))
+    }
+
+    /// Accrue interest for a reserve, advancing `b_rate` (supply) and `d_rate`
+    /// (borrow) based on elapsed time since `last_time`. Idempotent within a
+    /// ledger (dt == 0 is a no-op). 4.1.
+    fn accrue_reserve(e: &Env, asset: &Address) {
+        let mut data = Self::raw_reserve_data(e, asset);
+        let rcfg = Self::get_reserve_config(e, asset);
+        let now = e.ledger().timestamp();
+        if now <= data.last_time {
+            return;
+        }
+        let dt = now - data.last_time;
+
+        let rate = i128::from(rcfg.interest_rate);
+        if rate == 0 {
+            data.last_time = now;
+            Self::set_reserve_data(e, asset, &data);
+            return;
+        }
+
+        // Borrow side accrues at the full annual rate.
+        let accrued = rate * (dt as i128) / SECONDS_PER_YEAR; // 7-decimal fraction
+        let d_growth = SCALAR_7 + accrued;
+        data.d_rate = data.d_rate * d_growth / SCALAR_7;
+
+        // Supply side accrues at utilization * borrow rate (reserve factor omitted for simplicity).
+        let util = if data.b_supply > 0 {
+            data.d_supply * SCALAR_7 / data.b_supply
+        } else {
+            0
+        };
+        let s_accrued = accrued * util / SCALAR_7;
+        let b_growth = SCALAR_7 + s_accrued;
+        data.b_rate = data.b_rate * b_growth / SCALAR_7;
+
+        data.last_time = now;
+        Self::set_reserve_data(e, asset, &data);
+    }
+
+    fn get_reserve_data(e: &Env, asset: &Address) -> ReserveData {
+        Self::accrue_reserve(e, asset);
+        Self::raw_reserve_data(e, asset)
     }
 
     fn set_reserve_data(e: &Env, asset: &Address, data: &ReserveData) {
@@ -430,6 +477,12 @@ impl PusdPool {
         (cfg, data)
     }
 
+    /// Accrue interest for a reserve (advances b_rate/d_rate). Callable by anyone;
+    /// safe to call repeatedly. 4.1.
+    pub fn accrue_interest(e: Env, asset: Address) {
+        Self::accrue_reserve(&e, &asset);
+    }
+
     pub fn get_positions(e: Env, address: Address) -> Positions {
         let res_list = Self::get_res_list(&e);
         let mut collateral = Map::new(&e);
@@ -507,3 +560,6 @@ impl PusdPool {
         .publish(&e);
     }
 }
+
+#[cfg(test)]
+mod test;

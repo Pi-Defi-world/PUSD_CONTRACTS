@@ -223,13 +223,15 @@ impl PusdSavings {
         if amount <= 0 {
             return Err(Error::InvalidAmount);
         }
+        let mut s = accrue(&e, &user);
+        s.principal += amount;
+        // 4.6: update state before the external transfer (CEI). A failed
+        // transfer reverts the whole tx, so writing first is safe.
+        write_user(&e, &user, &s);
+
         let pusd_token = read_pusd_token(&e);
         let client = token::Client::new(&e, &pusd_token);
         client.transfer(&user, &e.current_contract_address(), &amount);
-
-        let mut s = accrue(&e, &user);
-        s.principal += amount;
-        write_user(&e, &user, &s);
         DepositEvent { user, amount }.publish(&e);
         Ok(())
     }
@@ -261,11 +263,13 @@ impl PusdSavings {
             s.principal -= remaining;
         }
 
+        // 4.6: update state before the external transfer (CEI) to prevent
+        // reentrant double-withdraw.
+        write_user(&e, &user, &s);
+
         let pusd_token = read_pusd_token(&e);
         let client = token::Client::new(&e, &pusd_token);
         client.transfer(&e.current_contract_address(), &user, &amount);
-
-        write_user(&e, &user, &s);
         WithdrawEvent { user, amount }.publish(&e);
         Ok(())
     }

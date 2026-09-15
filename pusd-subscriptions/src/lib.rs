@@ -40,6 +40,7 @@ pub enum Error {
     InvalidPeriod = 5,
     SubscriptionNotFound = 6,
     Inactive = 7,
+    AlreadyExists = 8,
 }
 
 use soroban_sdk::panic_with_error;
@@ -75,6 +76,11 @@ impl PusdSubscriptions {
         subscriber.require_auth();
         require(&e, amount_per_period > 0, Error::InvalidAmount);
         require(&e, period_ledgers > 0, Error::InvalidPeriod);
+        require(
+            &e,
+            !e.storage().instance().has(&DataKey::Subscription(id.clone())),
+            Error::AlreadyExists,
+        );
 
         let pusd_token: Address = e
             .storage()
@@ -93,6 +99,7 @@ impl PusdSubscriptions {
             active: true,
         };
 
+        // 4.5: unique subscription id — reject collisions.
         e.storage().instance().set(&DataKey::Subscription(id), &sub);
     }
 
@@ -130,11 +137,14 @@ impl PusdSubscriptions {
 
         let to_charge = sub.amount_per_period * (periods_elapsed as i128);
 
+        // 4.5: advance the charged ledger by the periods actually charged
+        // (not just to `now`) so partial periods are not silently dropped,
+        // and update state before the external transfer (CEI).
+        sub.last_charged_ledger = last + periods_elapsed * sub.period_ledgers;
+        e.storage().instance().set(&key, &sub);
+
         let client = token::Client::new(&e, &sub.pusd_token);
         client.transfer(&sub.subscriber, &sub.merchant, &to_charge);
-
-        sub.last_charged_ledger = now;
-        e.storage().instance().set(&key, &sub);
     }
 
     pub fn get_subscription(e: Env, id: Address) -> Option<Subscription> {

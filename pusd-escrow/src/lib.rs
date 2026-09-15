@@ -13,6 +13,7 @@ use soroban_sdk::token;
 #[contracttype]
 #[derive(Clone)]
 pub struct Escrow {
+    pub id: u64,
     pub payer: Address,
     pub payee: Address,
     pub amount: i128,
@@ -24,7 +25,8 @@ pub struct Escrow {
 
 #[contracttype]
 pub enum DataKey {
-    Escrow(Address),
+    Escrow(u64),
+    NextId,
     Admin,
     PusdToken,
 }
@@ -73,7 +75,7 @@ impl PusdEscrow {
         payee: Address,
         amount: i128,
         deadline_ledger: u32,
-    ) {
+    ) -> u64 {
         payer.require_auth();
         require(&e, amount > 0, Error::InvalidAmount);
 
@@ -83,11 +85,15 @@ impl PusdEscrow {
             .get(&DataKey::PusdToken)
             .unwrap();
 
+        let id: u64 = e.storage().instance().get(&DataKey::NextId).unwrap_or(1);
+        e.storage().instance().set(&DataKey::NextId, &(id + 1));
+
         // Pull PUSD from payer into this contract.
         let client = token::Client::new(&e, &pusd_token);
         client.transfer(&payer, &e.current_contract_address(), &amount);
 
         let escrow = Escrow {
+            id,
             payer: payer.clone(),
             payee,
             amount,
@@ -97,36 +103,36 @@ impl PusdEscrow {
             refunded: false,
         };
 
-        e.storage().instance().set(&DataKey::Escrow(payer), &escrow);
+        // 4.4: key each escrow by a unique id so a payer can hold many
+        // escrows without overwriting prior funds.
+        e.storage().instance().set(&DataKey::Escrow(id), &escrow);
+        id
     }
 
-    pub fn release(e: Env, payer: Address) {
-        payer.require_auth();
-        let key = DataKey::Escrow(payer.clone());
+    pub fn release(e: Env, escrow_id: u64) {
+        let key = DataKey::Escrow(escrow_id);
         let mut escrow: Escrow = e.storage().instance().get(&key).unwrap_or_else(|| {
             panic_with_error!(&e, Error::EscrowNotFound)
         });
 
+        escrow.payer.require_auth();
         require(&e, !escrow.released && !escrow.refunded, Error::EscrowAlreadyCompleted);
 
-        let client = token::Client::new(&e, &escrow.pusd_token);
-        client.transfer(
-            &e.current_contract_address(),
-            &escrow.payee,
-            &escrow.amount,
-        );
-
+        // 4.4: update state before the external transfer (CEI).
         escrow.released = true;
         e.storage().instance().set(&key, &escrow);
+
+        let client = token::Client::new(&e, &escrow.pusd_token);
+        client.transfer(&e.current_contract_address(), &escrow.payee, &escrow.amount);
     }
 
-    pub fn refund(e: Env, payer: Address) {
-        payer.require_auth();
-        let key = DataKey::Escrow(payer.clone());
+    pub fn refund(e: Env, escrow_id: u64) {
+        let key = DataKey::Escrow(escrow_id);
         let mut escrow: Escrow = e.storage().instance().get(&key).unwrap_or_else(|| {
             panic_with_error!(&e, Error::EscrowNotFound)
         });
 
+        escrow.payer.require_auth();
         require(&e, !escrow.released && !escrow.refunded, Error::EscrowAlreadyCompleted);
         require(
             &e,
@@ -134,19 +140,16 @@ impl PusdEscrow {
             Error::BeforeDeadline,
         );
 
-        let client = token::Client::new(&e, &escrow.pusd_token);
-        client.transfer(
-            &e.current_contract_address(),
-            &escrow.payer,
-            &escrow.amount,
-        );
-
+        // 4.4: update state before the external transfer (CEI).
         escrow.refunded = true;
         e.storage().instance().set(&key, &escrow);
+
+        let client = token::Client::new(&e, &escrow.pusd_token);
+        client.transfer(&e.current_contract_address(), &escrow.payer, &escrow.amount);
     }
 
-    pub fn get_escrow(e: Env, payer: Address) -> Option<Escrow> {
-        e.storage().instance().get(&DataKey::Escrow(payer))
+    pub fn get_escrow(e: Env, escrow_id: u64) -> Option<Escrow> {
+        e.storage().instance().get(&DataKey::Escrow(escrow_id))
     }
 }
 
